@@ -16,7 +16,6 @@ name: gb10-drydock-platform
 include:
   # Pull in the official NVIDIA vulnerability-analysis compose
   # (assumes the repo is cloned next to this file as ./vulnerability-analysis)
-  include:
   - path: ./vulnerability-analysis/deploy/docker-compose.yml
     project_directory: ./vulnerability-analysis
     

@@ -30,7 +30,7 @@ x-vllm-common: &vllm-common
             capabilities: [gpu]
   restart: unless-stopped
   networks:
-    - default
+    - gb10-drydock-net
 
 services:
   vllm-head:

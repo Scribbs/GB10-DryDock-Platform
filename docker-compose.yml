@@ -1,0 +1,59 @@
+name: gb10-vuln-analysis
+
+services:
+  # Web Frontend
+  frontend:
+    build: ./frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
+      - PROCESSOR_URL=${PROCESSOR_URL:-http://processor:8080}
+    depends_on:
+      - processor
+      - vuln-analysis-api
+    restart: unless-stopped
+
+  # SBOM + CVE Processor
+  processor:
+    build: ./processor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # for image pulls (use with caution)
+      - processor-cache:/cache
+    environment:
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+    restart: unless-stopped
+
+  # NVIDIA Vulnerability Analysis API
+  # (This is a simplified placeholder. In production, clone the upstream repo
+  #  and include its deploy/docker-compose.yml services, or use include:.)
+  vuln-analysis-api:
+    image: vuln-analysis:3.0.0   # Build from upstream or pull if published
+    # build:
+    #   context: ../vulnerability-analysis   # Path to cloned NVIDIA repo
+    #   dockerfile: deploy/Dockerfile
+    command: ["nat", "serve", "--config_file", "configs/config.yml"]
+    ports:
+      - "26466:26466"
+    environment:
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - NV_BASE_URL=${NV_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      - VULN_ANALYSIS_IMAGE_CACHE=/cache/images
+      - VULN_ANALYSIS_STAGE_CACHE=/cache/stages
+    volumes:
+      - analysis-cache:/cache
+      - analysis-outputs:/outputs
+    restart: unless-stopped
+
+  # Optional: NGINX reverse proxy / cache (from upstream)
+  # nginx:
+  #   image: nginx:alpine
+  #   ...
+
+volumes:
+  processor-cache:
+  analysis-cache:
+  analysis-outputs:

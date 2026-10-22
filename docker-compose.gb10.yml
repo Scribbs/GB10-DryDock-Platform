@@ -1,0 +1,33 @@
+# Overlay for 2-node GB10 cluster
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gb10.yml up -d
+
+services:
+  vuln-analysis-api:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # Point to self-hosted NIM running on the cluster
+      - NV_BASE_URL=http://nim-llm:8000/v1
+    # Example: pin to node1 or use Swarm/K8s for multi-node
+
+  # Example self-hosted NIM service (add real NIM image + model volume)
+  nim-llm:
+    image: nvcr.io/nim/nvidia/nemotron-3-ultra-550b-a55b:latest   # example
+    ports:
+      - "8000:8000"
+    environment:
+      - NGC_API_KEY=${NVIDIA_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # For true 2-node tensor parallel, use vLLM or NIM multi-node launch
+    # with NCCL_SOCKET_IFNAME set to the QSFP interface.

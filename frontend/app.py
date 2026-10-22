@@ -1,0 +1,85 @@
+"""
+Streamlit frontend for the GB10 Vulnerability Analysis Platform.
+Inspired by DryDock-style contextual reporting.
+"""
+import json
+import time
+import httpx
+import streamlit as st
+
+st.set_page_config(page_title="GB10 Vuln Analysis", layout="wide", page_icon="🛡️")
+
+ANALYSIS_URL = "http://vuln-analysis-api:26466"  # overridden by env in real compose
+PROCESSOR_URL = "http://processor:8080"
+
+st.title("🛡️ GB10 Vulnerability Analysis Platform")
+st.caption("NVIDIA AI Blueprint + Syft/Trivy pipeline on Dell GB10 Cluster")
+
+tab1, tab2, tab3 = st.tabs(["New Analysis", "Job Status", "Reports"])
+
+with tab1:
+    st.subheader("Submit an Image or Repository")
+    col1, col2 = st.columns(2)
+    with col1:
+        image = st.text_input("Docker Image", placeholder="nginx:1.25 or registry.example.com/app:latest")
+    with col2:
+        github = st.text_input("GitHub Repository (optional)", placeholder="https://github.com/org/repo")
+
+    cve_filter = st.text_area("Specific CVEs (one per line, optional)", height=100)
+
+    if st.button("Start Analysis", type="primary"):
+        if not image and not github:
+            st.error("Provide at least an image or a GitHub URL.")
+        else:
+            payload = {}
+            if image:
+                payload["image"] = image
+            if github:
+                payload["github"] = github
+            if cve_filter.strip():
+                payload["cves"] = [c.strip() for c in cve_filter.splitlines() if c.strip()]
+
+            with st.spinner("Generating SBOM + CVEs and submitting job..."):
+                try:
+                    resp = httpx.post(f"{PROCESSOR_URL}/process", json=payload, timeout=300)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    st.session_state["last_job"] = result["job_id"]
+                    st.success(f"Job submitted: `{result['job_id']}`")
+                    st.json(result["pipeline_input"])
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+with tab2:
+    st.subheader("Check Job Status")
+    job_id = st.text_input("Job ID", value=st.session_state.get("last_job", ""))
+    if job_id and st.button("Refresh"):
+        try:
+            resp = httpx.get(f"{ANALYSIS_URL}/v1/workflow/async/job/{job_id}")
+            resp.raise_for_status()
+            data = resp.json()
+            st.json(data)
+            if data.get("status") == "completed":
+                st.success("Analysis complete. Switch to the Reports tab.")
+        except Exception as e:
+            st.error(str(e))
+
+with tab3:
+    st.subheader("View Reports")
+    st.info("Reports are written by the NVIDIA blueprint to the shared outputs volume. "
+            "In a full deployment this tab would list Markdown files and VEX JSON from `/outputs`.")
+    st.code("""
+# Example structure produced by the blueprint:
+outputs/
+├── vulnerability_reports/
+├── container_reports/
+├── exploitability_reports/
+└── vex_results/
+""")
+
+st.sidebar.markdown("""
+### Cluster Status
+- Nodes: 2 × Dell GB10
+- Interconnect: QSFP DAC (RoCE)
+- Analysis Engine: NVIDIA Vulnerability Analysis Blueprint
+""")

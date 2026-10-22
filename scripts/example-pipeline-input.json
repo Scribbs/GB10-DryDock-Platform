@@ -1,0 +1,8 @@
+{
+  "image_name": "nginx",
+  "image_tag": "1.25",
+  "vulnerabilities": [
+    {"id": "CVE-2023-XXXX"},
+    {"id": "CVE-2024-YYYY"}
+  ]
+}

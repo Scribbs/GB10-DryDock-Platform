@@ -39,6 +39,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - RAY_AUTH_MODE=disabled
       - HF_TOKEN=${HF_TOKEN}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - NCCL_IB_DISABLE=0
@@ -71,6 +72,7 @@ services:
     depends_on:
       - vllm-head
     environment:
+      - RAY_AUTH_MODE=disabled
       - HF_TOKEN=${HF_TOKEN}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - NCCL_IB_DISABLE=0

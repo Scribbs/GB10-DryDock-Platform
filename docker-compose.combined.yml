@@ -62,5 +62,6 @@ volumes:
   # analysis volumes are created by the included upstream compose
 
 networks:
-  default:
+  gb10-drydock-net:
     name: gb10-drydock-net
+    driver: bridge

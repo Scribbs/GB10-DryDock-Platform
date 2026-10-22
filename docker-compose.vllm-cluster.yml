@@ -40,6 +40,8 @@ services:
       - "8000:8000"
     environment:
       - RAY_AUTH_MODE=disabled
+      - VLLM_HOST_IP=10.20.0.11
+      - MASTER_ADDR=10.20.0.11
       - HF_TOKEN=${HF_TOKEN}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - NCCL_IB_DISABLE=0
@@ -73,6 +75,8 @@ services:
       - vllm-head
     environment:
       - RAY_AUTH_MODE=disabled
+      - VLLM_HOST_IP=10.20.0.12
+      - MASTER_ADDR=10.20.0.11
       - HF_TOKEN=${HF_TOKEN}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - NCCL_IB_DISABLE=0
@@ -86,4 +90,4 @@ services:
       - MASTER_PORT=${MASTER_PORT:-29501}
       - NODE_RANK=1
     command: >
-      ray start --address=${HEAD_QSFP_IP}:6379 --block
+      ray start --address=10.20.0.11:6379:6379 --block

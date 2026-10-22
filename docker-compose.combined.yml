@@ -1,0 +1,66 @@
+name: gb10-drydock-platform
+
+# Combined stack: NVIDIA vulnerability-analysis blueprint + platform frontend/processor
+# + local vLLM multi-node NIM on the 2-node GB10/Spark cluster.
+#
+# Prerequisites:
+# - vulnerability-analysis/ cloned at ./vulnerability-analysis (relative to this file)
+# - .env in the same directory
+# - 2-node QSFP cluster already configured (see scripts/setup-gb10-cluster.sh and docs/)
+#
+# Usage (from the platform root):
+#   docker compose -f docker-compose.combined.yml up --build -d
+# Or with the vLLM overlay:
+#   docker compose -f docker-compose.combined.yml -f docker-compose.vllm-cluster.yml up --build -d
+
+include:
+  # Pull in the official NVIDIA vulnerability-analysis compose
+  # (assumes the repo is cloned next to this file as ./vulnerability-analysis)
+  - path: ./vulnerability-analysis/deploy/docker-compose.yml
+    project_directory: ./vulnerability-analysis
+
+services:
+  # ── Platform services ──────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
+      - PROCESSOR_URL=${PROCESSOR_URL:-http://processor:8080}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-head:8000/v1}
+    depends_on:
+      - processor
+    restart: unless-stopped
+    networks:
+      - default
+
+  processor:
+    build: ./processor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - processor-cache:/cache
+    environment:
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
+    restart: unless-stopped
+    networks:
+      - default
+
+  # Optional reverse proxy / status page (can be extended)
+  # nginx-status:
+  #   image: nginx:alpine
+  #   ports:
+  #     - "8088:80"
+  #   volumes:
+  #     - ./nginx/status.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  processor-cache:
+  # analysis volumes are created by the included upstream compose
+
+networks:
+  default:
+    name: gb10-drydock-net

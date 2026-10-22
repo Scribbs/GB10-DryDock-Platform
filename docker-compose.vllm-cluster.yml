@@ -19,18 +19,6 @@ x-vllm-common: &vllm-common
       hard: 1048576
     memlock: -1
     stack: 67108864
-  environment: &vllm-env
-    - HF_TOKEN=${HF_TOKEN}
-    - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-    - NCCL_IB_DISABLE=0
-    - NCCL_IB_HCA=${NCCL_IB_HCA:-rocep1s0f1,roceP2p1s0f1}
-    - UCX_NET_DEVICES=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-    - GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-    - TP_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-    - OMPI_MCA_btl_tcp_if_include=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-    - VLLM_HOST_IP=${HEAD_QSFP_IP}
-    - MASTER_ADDR=${HEAD_QSFP_IP}
-    - MASTER_PORT=${MASTER_PORT:-29501}
   volumes:
     - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
   deploy:
@@ -50,6 +38,20 @@ services:
     hostname: vllm-head
     ports:
       - "8000:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - NCCL_IB_DISABLE=0
+      - NCCL_IB_HCA=${NCCL_IB_HCA:-rocep1s0f1,roceP2p1s0f1}
+      - UCX_NET_DEVICES=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - TP_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - OMPI_MCA_btl_tcp_if_include=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - VLLM_HOST_IP=${HEAD_QSFP_IP}
+      - MASTER_ADDR=${HEAD_QSFP_IP}
+      - MASTER_PORT=${MASTER_PORT:-29501}
+      - NODE_RANK=0
+      - RAY_HEAD=1
     command: >
       vllm serve ${MODEL_ID:-nvidia/Qwen3.8-27B-NVFP4}
         --host 0.0.0.0
@@ -62,24 +64,24 @@ services:
         --enable-prefix-caching
         --enable-chunked-prefill
         --trust-remote-code
-    environment:
-      - <<: *vllm-env
-      - NODE_RANK=0
-      - RAY_HEAD=1
 
   vllm-worker:
     <<: *vllm-common
     hostname: vllm-worker
     depends_on:
       - vllm-head
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - NCCL_IB_DISABLE=0
+      - NCCL_IB_HCA=${NCCL_IB_HCA:-rocep1s0f1,roceP2p1s0f1}
+      - UCX_NET_DEVICES=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - TP_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - OMPI_MCA_btl_tcp_if_include=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
+      - VLLM_HOST_IP=${WORKER_QSFP_IP}
+      - MASTER_ADDR=${HEAD_QSFP_IP}
+      - MASTER_PORT=${MASTER_PORT:-29501}
+      - NODE_RANK=1
     command: >
       ray start --address=${HEAD_QSFP_IP}:6379 --block
-    environment:
-      - <<: *vllm-env
-      - NODE_RANK=1
-      - VLLM_HOST_IP=${WORKER_QSFP_IP}
-
-# Note: For true multi-node, the worker container should run on the second physical node.
-# In a single-host Docker Compose this is illustrative; use docker context, Swarm,
-# or the community launch-cluster.sh scripts (eugr/spark-vllm-docker) for production
-# multi-node placement across the QSFP link.

@@ -27,8 +27,8 @@ services:
       - "8501:8501"
     environment:
       - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
-      - PROCESSOR_URL=${PROCESSOR_URL:-http://processor:8080}
-      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-head:8000/v1}
+      - PROCESSOR_URL=${PROCESSOR_URL:-http://processor:8180}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-head:8001/v1}
     depends_on:
       - processor
     restart: unless-stopped
@@ -38,9 +38,10 @@ services:
   processor:
     build: ./processor
     ports:
-      - "8080:8080"
+      - "8081:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /.docker/config.json:/root/.docker/config.json:ro
       - processor-cache:/cache
     environment:
       - NVIDIA_API_KEY=${NVIDIA_API_KEY}

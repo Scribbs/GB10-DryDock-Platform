@@ -1,5 +1,6 @@
 """
 SBOM + CVE processor that builds PipelineInput for the NVIDIA vulnerability-analysis blueprint.
+Only CVEs whose packages appear in the Syft SBOM are forwarded.
 """
 import json
 import subprocess
@@ -33,16 +34,23 @@ def run_syft(image: str, output: Path) -> None:
     cmd = ["syft", image, "-o", f"cyclonedx-json={output}"]
     subprocess.run(cmd, check=True, capture_output=True)
 
-def run_trivy_cves(image: str) -> list[str]:
+def run_trivy_json(image: str) -> dict:
     cmd = ["trivy", "image", "--format", "json", "--quiet", image]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    cves = set()
-    for result_item in data.get("Results", []):
-        for vuln in result_item.get("Vulnerabilities", []):
-            if vuln_id := vuln.get("VulnerabilityID"):
-                cves.add(vuln_id)
-    return sorted(cves)
+    return json.loads(result.stdout)
+
+def cves_matching_sbom(sbom_path: Path, trivy_json: dict) -> list[str]:
+    """Return only CVE IDs whose package name appears in the Syft SBOM."""
+    sbom = json.loads(sbom_path.read_text())
+    sbom_pkgs = {c.get("name", "").lower() for c in sbom.get("components", []) if c.get("name")}
+    matched = set()
+    for result in trivy_json.get("Results", []):
+        for vuln in result.get("Vulnerabilities", []):
+            pkg = (vuln.get("PkgName") or "").lower()
+            if pkg and pkg in sbom_pkgs:
+                if vid := vuln.get("VulnerabilityID"):
+                    matched.add(vid)
+    return sorted(matched)
 
 def build_pipeline_input(image: str, cves: list[str]) -> dict:
     return {
@@ -65,11 +73,14 @@ async def process(req: ProcessRequest):
             image = clean_image_ref(req.image)
             run_syft(image, sbom_file)
             if not cves:
-                cves = run_trivy_cves(image)
-            cves = cves[:20]          # safety cap
+                trivy_json = run_trivy_json(image)
+                cves = cves_matching_sbom(sbom_file, trivy_json)
+            cves = cves[:2]          # safety cap
             target = image
 
         pipeline_input = build_pipeline_input(target, cves)
+        pipeline_input["skip_web_research"] = False
+        pipeline_input["cache"] = False
         print("DEBUG payload:", json.dumps(pipeline_input)[:2000])
 
         analysis_url = "http://192.168.1.111:26466/v1/workflow/async"

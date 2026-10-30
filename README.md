@@ -1,80 +1,74 @@
-# GB10 / Spark 2-Node Vulnerability Analysis Platform (Updated)
+# GB10-DryDock-Platform
 
-Combined deployment of:
+Local multi-node deployment of the NVIDIA AI Blueprint for Vulnerability Analysis on a 2-node Dell GB10 (Grace Blackwell) cluster, with a custom processor and web frontend in the style of [DryDock](https://drydock.intelligenesis.us/).
 
-- **NVIDIA AI Blueprint for Vulnerability Analysis** (cloned at `./vulnerability-analysis`)
-- Platform frontend + SBOM/CVE processor
-- **Local multi-node vLLM** on a 2-node Dell GB10 / DGX Spark cluster (QSFP DAC / RoCE)
+The stack runs the vulnerability-analysis pipeline against local models served by vLLM across the QSFP RoCE interconnect, while a processor service generates SBOMs and CVE lists (Syft + Trivy) and submits properly formatted `PipelineInput` jobs.
 
-## Layout on disk
+## Architecture
 
-```
-~/projects/GB10-DryDock-Platform/
-├── docker-compose.combined.yml      # this file + include of upstream
-├── docker-compose.vllm-cluster.yml  # 2-node vLLM overlay
-├── .env
-├── frontend/
-├── processor/
-├── vulnerability-analysis/          # cloned NVIDIA blueprint
-│   └── deploy/docker-compose.yml
-└── ...
-```
+- **vLLM head + worker** – multi-node tensor-parallel serving over the QSFP links (10.20.0.11 / 10.20.0.12)
+- **vulnerability-analysis API** – NVIDIA blueprint (NAT workflow) listening on port 26466
+- **Processor** – FastAPI service that runs Syft/Trivy and posts to the analysis API
+- **Frontend** – React UI for submitting images/repos and viewing results
+- **Supporting services** – nginx cache, job state, etc.
+
+## Prerequisites
+
+- 2× Dell GB10 nodes with QSFP DAC connected
+- Docker + NVIDIA Container Toolkit
+- Hugging Face token (for model downloads)
+- Docker Hub / registry credentials if pulling private images
 
 ## Quick Start
 
 ```bash
 cd ~/projects/GB10-DryDock-Platform
 
-# 1. Ensure the blueprint is cloned
-# git clone https://github.com/NVIDIA-AI-Blueprints/vulnerability-analysis.git
-
-# 2. Configure
+# Copy and edit environment
 cp .env.example .env
-# Edit .env: NVIDIA_API_KEY, TAVILY_API_KEY, HF_TOKEN, interface names, IPs
+# Set HEAD_QSFP_IP, WORKER_QSFP_IP, HF_TOKEN, DEFAULT_MODEL_NAME, etc.
 
-# 3. (Optional) Bring up only the analysis + frontend
-docker compose -f docker-compose.combined.yml up --build -d
-
-# 4. Full stack with local 2-node vLLM
+# Bring up the combined stack
 docker compose -f docker-compose.combined.yml -f docker-compose.vllm-cluster.yml up --build -d
 ```
 
-## 2-Node Cluster Preconfiguration
+## Per-Image Output Layout
 
-The Sparks / GB10 nodes must already be connected with a QSFP DAC cable and have:
+Jobs now write reports under an image-specific directory so multiple images can be analyzed without overwriting results:
 
-- Passwordless SSH between nodes
-- QSFP interfaces up with static IPs (or link-local) and MTU 9000
-- NCCL environment variables pointing at the RoCE interfaces
+```
+outputs/<sanitized-image-name>/
+├── vulnerability_reports/
+├── container_reports/
+├── exploitability_reports/
+├── vex_results/
+└── failed_reports/          # only when present
+```
 
-See:
+Set `output_dir` in the `PipelineInput` (the processor does this automatically).
 
-- `scripts/setup-gb10-cluster.sh`
-- `docs/deployment-gb10.md`
-- NVIDIA playbooks: https://github.com/NVIDIA/dgx-spark-playbooks (connect-two-sparks, nccl, vllm)
+## Key Environment Variables
 
-Community multi-node vLLM references used:
+| Variable              | Purpose                              | Example                  |
+|-----------------------|--------------------------------------|--------------------------|
+| `HEAD_QSFP_IP`        | Head node QSFP address               | `10.20.0.11`             |
+| `WORKER_QSFP_IP`      | Worker node QSFP address             | `10.20.0.12`             |
+| `DEFAULT_MODEL_NAME`  | Model used by the blueprint          | `nvidia/Qwen3.8-27B-NVFP4` |
+| `HF_TOKEN`            | Hugging Face access token            | `hf_...`                 |
+| `NCCL_SOCKET_IFNAME`  | RoCE interface                       | `enp1s0f1np1`            |
 
-- https://github.com/eugr/spark-vllm-docker
-- https://github.com/pfn/spark-vllm-compose
-- https://github.com/timothystewart6/vllm-gb10
+## Development
 
-## How the pieces talk
+See the individual compose files and the `processor/` directory for details.
 
-- Frontend / processor → vulnerability-analysis API (`vuln-analysis-api:26466`)
-- vulnerability-analysis agents → local vLLM (`vllm-head:8000/v1`) when `NV_BASE_URL` is set accordingly
-- vLLM head + worker communicate over the QSFP RoCE link for tensor-parallel inference
-
-## Notes on multi-node placement
-
-Docker Compose on a single host cannot automatically place the worker container on the second physical node. For production 2-node runs use one of:
-
-1. The community `launch-cluster.sh` scripts from eugr/spark-vllm-docker (recommended)
-2. Docker contexts / Swarm / Kubernetes
-3. Manual `docker run` on each node with matching NCCL settings
-
-The compose overlay is provided as a clear, reviewable template of the required environment and command lines.
+- `docker-compose.combined.yml` – platform + vulnerability-analysis services
+- `docker-compose.vllm-cluster.yml` – vLLM head/worker overlay
+- `processor/process.py` – Syft/Trivy → PipelineInput logic
 
 ## License & Acknowledgements
 
-See `ACKNOWLEDGEMENTS.md` and `licenses/`. The NVIDIA blueprint remains Apache-2.0.
+This project builds on the [NVIDIA AI Blueprint for Vulnerability Analysis](https://github.com/NVIDIA-AI-Blueprints/vulnerability-analysis). See the upstream repository for license terms and required acknowledgements. The DryDock-style UI and processor are local additions.
+
+## Roadmap
+
+Planned improvements are tracked in [TODO.md](TODO.md).

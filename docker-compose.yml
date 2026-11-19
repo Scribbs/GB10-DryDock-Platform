@@ -9,6 +9,8 @@ services:
     environment:
       - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
       - PROCESSOR_URL=${PROCESSOR_URL:-http://processor:8080}
+      - VLLM_BASE_URL=http://10.20.0.11:8001/v1
+      - RAY_DASHBOARD_URL=http://10.20.0.11:8265
     depends_on:
       - processor
       - vuln-analysis-api

@@ -1,0 +1,150 @@
+"""
+SBOM + CVE processor that builds PipelineInput for the NVIDIA vulnerability-analysis blueprint.
+Only CVEs whose packages appear in the Syft SBOM are preferred; Trivy CVEs are the fallback.
+"""
+import json
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+import httpx
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI(title="Vulnerability Pipeline Processor")
+
+ANALYSIS_URL = os.getenv(
+    "ANALYSIS_URL", "http://192.168.1.111:26466/v1/workflow/async"
+)
+OUTPUT_ROOT = os.getenv("OUTPUT_DIR_ROOT", "outputs")
+CVE_CAP = int(os.getenv("CVE_CAP", "2"))
+
+
+class ProcessRequest(BaseModel):
+    image: Optional[str] = None
+    github: Optional[str] = None
+    cves: Optional[list[str]] = None
+
+
+class ProcessResponse(BaseModel):
+    job_id: str
+    pipeline_input: dict
+    sbom_path: Optional[str] = None
+
+
+def clean_image_ref(raw: str) -> str:
+    raw = raw.strip()
+    if raw.lower().startswith("docker pull "):
+        raw = raw[len("docker pull "):].strip()
+    return raw
+
+
+def sanitize_image_name(image: str) -> str:
+    name = image.split("@", 1)[0]
+    name = name.replace("/", "_").replace(":", "_")
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("._")
+    return (name or "unknown")[:200]
+
+
+def run_syft(image: str, output: Path) -> None:
+    cmd = ["syft", image, "-o", f"cyclonedx-json={output}"]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def run_trivy_json(image: str) -> dict:
+    cmd = ["trivy", "image", "--format", "json", "--quiet", image]
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return json.loads(result.stdout or "{}")
+
+
+def trivy_cve_ids(trivy_json: dict) -> list[str]:
+    found = set()
+    for result in trivy_json.get("Results") or []:
+        for vuln in result.get("Vulnerabilities") or []:
+            if vid := vuln.get("VulnerabilityID"):
+                found.add(vid)
+    return sorted(found)
+
+
+def cves_matching_sbom(sbom_path: Path, trivy_json: dict) -> list[str]:
+    """Return only CVE IDs whose package name appears in the Syft SBOM."""
+    sbom = json.loads(sbom_path.read_text())
+    sbom_pkgs = {
+        c.get("name", "").lower()
+        for c in sbom.get("components", [])
+        if c.get("name")
+    }
+    matched = set()
+    for result in trivy_json.get("Results") or []:
+        for vuln in result.get("Vulnerabilities") or []:
+            pkg = (vuln.get("PkgName") or "").lower()
+            if pkg and pkg in sbom_pkgs:
+                if vid := vuln.get("VulnerabilityID"):
+                    matched.add(vid)
+    return sorted(matched)
+
+
+def build_pipeline_input(image: str, cves: list[str]) -> dict:
+    return {
+        "image_name": image.split(":")[0] if ":" in image else image,
+        "image_tag": image.split(":")[1] if ":" in image else "latest",
+        "vulns": [{"vuln_id": cve} for cve in cves],
+        "output_dir": f"{OUTPUT_ROOT}/{sanitize_image_name(image)}",
+    }
+
+
+@app.post("/process", response_model=ProcessResponse)
+async def process(req: ProcessRequest):
+    if not req.image and not req.github:
+        raise HTTPException(400, "Provide either 'image' or 'github'")
+
+    target = req.image or req.github
+    with tempfile.TemporaryDirectory() as tmp:
+        sbom_file = Path(tmp) / "sbom.cdx.json"
+        cves = list(req.cves or [])
+
+        if req.image:
+            image = clean_image_ref(req.image)
+            run_syft(image, sbom_file)
+            if not cves:
+                trivy_json = run_trivy_json(image)
+                matched = cves_matching_sbom(sbom_file, trivy_json)
+                raw = trivy_cve_ids(trivy_json)
+                print(f"DEBUG cves: trivy={len(raw)} sbom_matched={len(matched)}")
+                cves = matched or raw
+            if not cves:
+                raise HTTPException(
+                    400,
+                    f"No CVEs found for {image}. "
+                    "Pass explicit CVEs, or check that Trivy has a vulnerability DB.",
+                )
+            cves = cves[:CVE_CAP]
+            target = image
+
+        pipeline_input = build_pipeline_input(target, cves)
+        pipeline_input["skip_web_research"] = False
+        pipeline_input["cache"] = False
+        if not pipeline_input["vulns"]:
+            raise HTTPException(400, "Refusing to submit a workflow with an empty vulns list")
+
+        print("DEBUG payload:", json.dumps(pipeline_input)[:2000])
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(ANALYSIS_URL, json=pipeline_input)
+            if resp.status_code >= 400:
+                print("DEBUG response:", resp.status_code, resp.text[:2000])
+            resp.raise_for_status()
+            job = resp.json()
+
+        return ProcessResponse(
+            job_id=job.get("job_id", "unknown"),
+            pipeline_input=pipeline_input,
+            sbom_path=str(sbom_file) if sbom_file.exists() else None,
+        )
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

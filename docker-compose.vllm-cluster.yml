@@ -1,11 +1,6 @@
-# Overlay for local multi-node vLLM (2-node GB10 / DGX Spark cluster)
-# Use together with docker-compose.combined.yml
-#
-# This launches a vLLM head + worker pair that spans both nodes via the QSFP RoCE link.
-# Point NV_BASE_URL / VLLM_BASE_URL at http://vllm-head:8000/v1 so the
-# vulnerability-analysis blueprint uses the local models instead of cloud NIMs.#
-# Adjust MODEL_ID, tensor-parallel-size, and network interface names for your setup.
-# Recommended community images: eugr/spark-vllm-b12x or ghcr.io/timothystewart6/vllm-gb10
+# Head runs on node 1. Worker runs only on node 2.
+# Node 1: docker compose -f docker-compose.combined.yml -f docker-compose.vllm-cluster.yml up -d
+# Node 2: docker compose -f docker-compose.combined.yml -f docker-compose.vllm-cluster.yml --profile worker up -d vllm-worker
 
 x-vllm-common: &vllm-common
   image: ${VLLM_IMAGE:-eugr/spark-vllm-b12x:latest}
@@ -37,8 +32,10 @@ services:
     environment:
       - RAY_AUTH_MODE=disabled
       - VLLM_HOST_IP=10.20.0.11
-      - MASTER_ADDR=10.20.0.11
       - RAY_NODE_IP_ADDRESS=10.20.0.11
+      - MASTER_ADDR=10.20.0.11
+      - MASTER_PORT=${MASTER_PORT:-29501}
+      - NODE_RANK=0
       - HF_TOKEN=${HF_TOKEN}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - NCCL_IB_DISABLE=0
@@ -47,20 +44,21 @@ services:
       - GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - TP_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - OMPI_MCA_btl_tcp_if_include=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-      - MASTER_PORT=${MASTER_PORT:-29501}
-      - NODE_RANK=0
     command: >
-      bash -c "ray start --head --node-ip-address=10.20.0.11 --port=6379 --dashboard-host=0.0.0.0 --block & sleep 8; exec vllm serve $${MODEL_ID:-nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4} --host 0.0.0.0 --port 8001 --tensor-parallel-size 2 --distributed-executor-backend ray --gpu-memory-utilization 0.75 --max-model-len 131072 --max-num-seqs 32 --max-num-batched-tokens 8192 --enable-prefix-caching --kv-cache-dtype fp8 --enable-prefix-caching --enable-chunked-prefill --trust-remote-code --enable-auto-tool-choice --tool-call-parser qwen3_coder"
-
+       bash -c "ray start --head --node-ip-address=10.20.0.11 --port=6379 --dashboard-host=0.0.0.0 --block & sleep 8; exec vllm serve $${MODEL_ID:-nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4} --host 0.0.0.0 --port 8001 --tensor-parallel-size 2 --distributed-executor-backend ray --gpu-memory-utilization 0.75 --max-model-len 131072 --max-num-seqs 32 --max-num-batched-tokens 8192 --enable-prefix-caching --kv-cache-dtype fp8 --enable-prefix-caching --enable-chunked-prefill --trust-remote-code --enable-auto-tool-choice --tool-call-parser qwen3_coder"
+  
   vllm-worker:
     <<: *vllm-common
+    profiles: ["worker"]
+    network_mode: host
     hostname: vllm-worker
-    depends_on:
-      - vllm-head
     environment:
       - RAY_AUTH_MODE=disabled
       - VLLM_HOST_IP=10.20.0.12
+      - RAY_NODE_IP_ADDRESS=10.20.0.12
       - MASTER_ADDR=10.20.0.11
+      - MASTER_PORT=${MASTER_PORT:-29501}
+      - NODE_RANK=1
       - HF_TOKEN=${HF_TOKEN}
       - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - NCCL_IB_DISABLE=0
@@ -69,35 +67,5 @@ services:
       - GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - TP_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
       - OMPI_MCA_btl_tcp_if_include=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-      - VLLM_HOST_IP=${WORKER_QSFP_IP}
-      - MASTER_ADDR=${HEAD_QSFP_IP}
-      - MASTER_PORT=${MASTER_PORT:-29501}
-      - NODE_RANK=1
     command: >
-      ray start --address=10.20.0.11:6379 --block
-
-
-#  vllm-worker:
-#    <<: *vllm-common
-#    network_mode: host
-#    hostname: vllm-worker
-#    depends_on:
-#      - vllm-head
-#    environment:
-#      - RAY_AUTH_MODE=disabled
-#      - VLLM_HOST_IP=10.20.0.12
-#      - MASTER_ADDR=10.20.0.11
-#      - RAY_NODE_IP_ADDRESS=10.20.0.12
-#      - RAY_RUNTIME_ENV_HOOK=0
-#      - HF_TOKEN=${HF_TOKEN}
-#      - NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-#      - NCCL_IB_DISABLE=0
-#      - NCCL_IB_HCA=${NCCL_IB_HCA:-rocep1s0f1,roceP2p1s0f1}
-#      - UCX_NET_DEVICES=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-#      - GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-#      - TP_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-#      - OMPI_MCA_btl_tcp_if_include=${NCCL_SOCKET_IFNAME:-enp1s0f1np1}
-#      - MASTER_PORT=${MASTER_PORT:-29501}
-#      - NODE_RANK=1
-#    command: >
-#           ray start --address=10.20.0.11:6379 --node-ip-address=10.20.0.12 --disable-usage-stats --block
+      ray start --address=10.20.0.11:6379 --node-ip-address=10.20.0.12 --block

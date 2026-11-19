@@ -29,6 +29,10 @@ services:
       - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
       - PROCESSOR_URL=${PROCESSOR_URL:-http://processor:8180}
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-head:8001/v1}
+    volumes:
+      - ./vulnerability-analysis/outputs:/app/outputs
+      - ./frontend/assets:/app/assets
+      - ./frontend/:/app
     depends_on:
       - processor
     restart: unless-stopped
@@ -43,9 +47,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /.docker/config.json:/root/.docker/config.json:ro
       - processor-cache:/cache
+      - ./vulnerability-analysis/outputs:/data/outputs
     environment:
       - NVIDIA_API_KEY=${NVIDIA_API_KEY}
       - VULN_ANALYSIS_URL=${VULN_ANALYSIS_URL:-http://vuln-analysis-api:26466}
+      - INVENTORY_ROOT=/data/outputs
     restart: unless-stopped
     networks:
       - gb10-drydock-net

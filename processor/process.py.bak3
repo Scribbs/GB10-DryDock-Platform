@@ -1,0 +1,234 @@
+"""
+SBOM + CVE processor for the NVIDIA vulnerability-analysis blueprint.
+
+High and Critical CVEs are submitted to the workflow.
+Medium, Low, and Unknown are written to cve_inventory.json for the Reports page.
+"""
+import json
+import os
+import re
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import httpx
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI(title="Vulnerability Pipeline Processor")
+
+ANALYSIS_URL = os.getenv(
+    "ANALYSIS_URL", "http://192.168.1.111:26466/v1/workflow/async"
+)
+INVENTORY_ROOT = Path(os.getenv("INVENTORY_ROOT", "/data/outputs"))
+OUTPUT_ROOT = os.getenv("OUTPUT_DIR_ROOT", "outputs")
+# 0 means send every High/Critical CVE. Default 2 avoids the context-budget failure.
+CVE_CAP = int(os.getenv("CVE_CAP", "2"))
+PIPELINE_SEVERITIES = {"CRITICAL", "HIGH"}
+SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+
+
+class ProcessRequest(BaseModel):
+    image: Optional[str] = None
+    github: Optional[str] = None
+    cves: Optional[list[str]] = None
+
+
+class ProcessResponse(BaseModel):
+    job_id: str
+    pipeline_input: dict
+    inventory_path: Optional[str] = None
+    analyzed_count: int = 0
+    listed_count: int = 0
+    sbom_path: Optional[str] = None
+
+
+def clean_image_ref(raw: str) -> str:
+    raw = raw.strip()
+    if raw.lower().startswith("docker pull "):
+        raw = raw[len("docker pull "):].strip()
+    return raw
+
+
+def sanitize_image_name(image: str) -> str:
+    name = image.split("@", 1)[0]
+    name = name.replace("/", "_").replace(":", "_")
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("._")
+    return (name or "unknown")[:200]
+
+
+def run_syft(image: str, output: Path) -> None:
+    subprocess.run(
+        ["syft", image, "-o", f"cyclonedx-json={output}"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def run_trivy_json(image: str) -> dict:
+    result = subprocess.run(
+        ["trivy", "image", "--scanners", "vuln", "--format", "json", "--quiet", image],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout or "{}")
+
+
+def sbom_package_names(sbom_path: Path) -> set[str]:
+    sbom = json.loads(sbom_path.read_text())
+    return {
+        c.get("name", "").lower()
+        for c in sbom.get("components", [])
+        if c.get("name")
+    }
+
+
+def extract_findings(trivy_json: dict, sbom_pkgs: set[str]) -> list[dict]:
+    findings = []
+    seen = set()
+    for result in trivy_json.get("Results") or []:
+        target = result.get("Target")
+        for vuln in result.get("Vulnerabilities") or []:
+            vid = vuln.get("VulnerabilityID")
+            pkg = vuln.get("PkgName") or ""
+            if not vid:
+                continue
+            key = (vid, pkg, vuln.get("InstalledVersion") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            severity = (vuln.get("Severity") or "UNKNOWN").upper()
+            findings.append(
+                {
+                    "vuln_id": vid,
+                    "severity": severity,
+                    "pkg_name": pkg,
+                    "installed_version": vuln.get("InstalledVersion"),
+                    "fixed_version": vuln.get("FixedVersion"),
+                    "title": vuln.get("Title"),
+                    "primary_url": vuln.get("PrimaryURL"),
+                    "target": target,
+                    "in_sbom": pkg.lower() in sbom_pkgs,
+                }
+            )
+    findings.sort(
+        key=lambda row: (SEVERITY_ORDER.get(row["severity"], 9), row["vuln_id"], row["pkg_name"])
+    )
+    return findings
+
+
+def pipeline_ids(findings: list[dict], explicit: list[str]) -> list[str]:
+    if explicit:
+        return explicit
+    ranked = sorted(
+        (row for row in findings if row["severity"] in PIPELINE_SEVERITIES),
+        key=lambda row: (
+            0 if row["in_sbom"] else 1,
+            SEVERITY_ORDER.get(row["severity"], 9),
+            row["vuln_id"],
+        ),
+    )
+    ordered = list(dict.fromkeys(row["vuln_id"] for row in ranked))
+    if CVE_CAP > 0:
+        return ordered[:CVE_CAP]
+    return ordered
+
+
+def build_pipeline_input(image: str, cves: list[str]) -> dict:
+    return {
+        "image_name": image.split(":")[0] if ":" in image else image,
+        "image_tag": image.split(":")[1] if ":" in image else "latest",
+        "vulns": [{"vuln_id": cve} for cve in cves],
+        "output_dir": f"{OUTPUT_ROOT}/{sanitize_image_name(image)}",
+    }
+
+
+def write_inventory(image: str, findings: list[dict], sent_ids: list[str]) -> Path:
+    folder = INVENTORY_ROOT / sanitize_image_name(image)
+    folder.mkdir(parents=True, exist_ok=True)
+    sent = set(sent_ids)
+    payload = {
+        "image": image,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "pipeline_vuln_ids": sent_ids,
+        "high_critical_not_sent": [
+            row["vuln_id"]
+            for row in findings
+            if row["severity"] in PIPELINE_SEVERITIES and row["vuln_id"] not in sent
+        ],
+        "findings": findings,
+    }
+    # unique while preserving order
+    payload["high_critical_not_sent"] = list(dict.fromkeys(payload["high_critical_not_sent"]))
+    path = folder / "cve_inventory.json"
+    path.write_text(json.dumps(payload, indent=2))
+    return path
+
+
+@app.post("/process", response_model=ProcessResponse)
+async def process(req: ProcessRequest):
+    if not req.image and not req.github:
+        raise HTTPException(400, "Provide either 'image' or 'github'")
+
+    target = req.image or req.github
+    with tempfile.TemporaryDirectory() as tmp:
+        sbom_file = Path(tmp) / "sbom.cdx.json"
+        findings: list[dict] = []
+        explicit = list(req.cves or [])
+
+        if req.image:
+            image = clean_image_ref(req.image)
+            run_syft(image, sbom_file)
+            trivy_json = run_trivy_json(image)
+            findings = extract_findings(trivy_json, sbom_package_names(sbom_file))
+            target = image
+
+        sent_ids = pipeline_ids(findings, explicit)
+        lower = [row for row in findings if row["severity"] not in PIPELINE_SEVERITIES]
+        print(
+            "DEBUG cves:",
+            f"total={len(findings)}",
+            f"high_critical_sent={len(sent_ids)}",
+            f"medium_and_below={len(lower)}",
+        )
+
+        inventory_path = None
+        if req.image:
+            inventory_path = write_inventory(target, findings, sent_ids)
+            print("DEBUG inventory:", inventory_path)
+
+        if not sent_ids:
+            raise HTTPException(
+                400,
+                "No High or Critical CVEs to analyze. "
+                "Medium and below were saved to the inventory for the Reports page.",
+            )
+
+        pipeline_input = build_pipeline_input(target, sent_ids)
+        pipeline_input["skip_web_research"] = False
+        pipeline_input["cache"] = False
+        print("DEBUG payload:", json.dumps(pipeline_input)[:2000])
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(ANALYSIS_URL, json=pipeline_input)
+            if resp.status_code >= 400:
+                print("DEBUG response:", resp.status_code, resp.text[:2000])
+            resp.raise_for_status()
+            job = resp.json()
+
+        return ProcessResponse(
+            job_id=job.get("job_id", "unknown"),
+            pipeline_input=pipeline_input,
+            inventory_path=str(inventory_path) if inventory_path else None,
+            analyzed_count=len(sent_ids),
+            listed_count=len(lower),
+            sbom_path=str(sbom_file) if sbom_file.exists() else None,
+        )
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
